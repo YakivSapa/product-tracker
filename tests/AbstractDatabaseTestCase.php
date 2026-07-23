@@ -1,34 +1,124 @@
 <?php
 
-namespace App\Tests\Utils;
+namespace App\Tests;
 
 use Doctrine\ORM\EntityManagerInterface;
-use Doctrine\ORM\Tools\SchemaTool;
 use LogicException;
-use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
-use Symfony\Component\HttpKernel\KernelInterface;
+use Symfony\Bundle\FrameworkBundle\KernelBrowser as Client;
+use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 
-class AbstractDatabaseTestCase extends KernelTestCase
+abstract class AbstractDatabaseTestCase extends WebTestCase
 {
+    protected ValidatorInterface $validator;
+    protected ?Client $client = null;
     protected EntityManagerInterface $entityManager;
-    
+
+    // Initialization of the Symfony kernel
     protected function setUp(): void
     {
-        $kernel = self::bootKernel();
-        if ('test' !== $kernel->getEnvironment()) {
-            throw new LogicException('Execution is possible only in Test environment.');
-        }
-        $this->initDatabase($kernel);
+        parent::setUp();
+        $this->client = static::createClient();
+        self::bootKernel();
 
-        $this->entityManager = $kernel->getContainer()
-            ->get('doctrine')
-            ->getManager();
+        $this->entityManager = self::getContainer()->get(EntityManagerInterface::class);
+        $this->validator = self::getContainer()->get(ValidatorInterface::class);
+
+        $this->createSchema();
     }
-    private function initDatabase(KernelInterface $kernel): void
+
+    // Database schema creation
+    private function createSchema(): void
     {
-        $entityManager = $kernel->getContainer()->get('doctrine.orm.entity_manager');
-        $metadata = $entityManager->getMetadataFactory()->getAllMetadata();
-        $schemaTool = new SchemaTool($entityManager);
-        $schemaTool->updateSchema($metadata);
+        $metadata = $this->entityManager->getMetadataFactory()->getAllMetadata();
+        if (empty($metadata)) {
+            throw new LogicException('No metadata found to create schema.');
+        }
+
+        $schemaTool = new \Doctrine\ORM\Tools\SchemaTool($this->entityManager);
+        $schemaTool->createSchema($metadata);
+    }
+
+    // Persists an entity to the database
+    protected function persist(object $entity): void
+    {
+        $this->entityManager->persist($entity);
+        $this->entityManager->flush();
+    }
+
+    // Removes an entity from the database
+    protected function remove(object $entity): void
+    {
+        $this->entityManager->remove($entity);
+        $this->entityManager->flush();
+    }
+
+    // Helper Methods
+    protected function assertEntityValid(object $entity): void
+    {
+        $violations = $this->validator->validate($entity);
+
+        $this->assertCount(
+            0,
+            $violations,
+            "Expected entity to be valid, but found validation errors:\n" . $this->formatViolations($violations)
+        );
+    }
+
+    protected function assertEntityInvalid(object $entity, int $expectedViolationsCount = null): void
+    {
+        $violations = $this->validator->validate($entity);
+
+        if ($expectedViolationsCount !== null) {
+            $this->assertCount($expectedViolationsCount, $violations);
+        } else {
+            $this->assertGreaterThan(0, $violations->count());
+        }
+    }
+
+    protected function assertPropertyHasViolation(object $entity, string $property): void
+    {
+        $violations = $this->validator->validate($entity);
+        
+        // Filter violations for the specific property
+        $propertyViolations = array_filter(
+            iterator_to_array($violations),
+            fn($v) => $v->getPropertyPath() === $property
+        );
+
+        $this->assertNotEmpty(
+            $propertyViolations,
+            "Expected property '$property' to have validation violations, but none were found."
+        );
+    }
+
+    protected function assertPropertyValid(object $entity, string $property): void
+    {
+        $violations = $this->validator->validate($entity);
+        
+        // Filter violations for the specific property
+        $propertyViolations = array_filter(
+            iterator_to_array($violations),
+            fn($v) => $v->getPropertyPath() === $property
+        );
+
+        $this->assertEmpty(
+            $propertyViolations,
+            "Expected property '$property' to be valid, but found validation violations."
+        );
+    }
+
+    // Format the violations into a readable string
+    private function formatViolations($violations): string
+    {
+        $formatted = '';
+        foreach ($violations as $violation) {
+            $formatted .= sprintf(
+                " - %s: %s\n",
+                $violation->getPropertyPath(),
+                $violation->getMessage()
+            );
+        }
+        return $formatted;
     }
 }
